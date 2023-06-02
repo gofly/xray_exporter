@@ -65,7 +65,7 @@ import (
 // 	return nil
 // }
 
-func executeQueryStats(addr, server string, downlink, uplink, obser *prometheus.GaugeVec) error {
+func executeQueryStats(addr, server string, downlink, uplink, delay *prometheus.GaugeVec) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/debug/vars", nil)
@@ -108,7 +108,7 @@ func executeQueryStats(addr, server string, downlink, uplink, obser *prometheus.
 		if ob.Delay > 10000 {
 			ob.Delay = -1
 		}
-		obser.WithLabelValues(ob.OutboundTag, server).Set(ob.Delay)
+		delay.WithLabelValues(ob.OutboundTag, server).Set(ob.Delay)
 	}
 	return nil
 }
@@ -153,7 +153,7 @@ func main() {
 		Name:      "uplink_bytes_total",
 		Help:      "uplink traffic of inbound",
 	}, []string{"inbound", "server"})
-	obser := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	delay := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "xray",
 		Subsystem: "observatory",
 		Name:      "delay_millisecond",
@@ -165,12 +165,15 @@ func main() {
 		Name:      "up",
 		Help:      "xray server up state",
 	}, []string{"server"})
-	prometheus.MustRegister(downlink, uplink, obser, up)
+	prometheus.MustRegister(downlink, uplink, delay, up)
 
 	handler := promhttp.Handler()
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		downlink.Reset()
+		uplink.Reset()
+		delay.Reset()
 		for _, instance := range config.Instances {
-			err := executeQueryStats(instance.Host, instance.Server, downlink, uplink, obser)
+			err := executeQueryStats(instance.Host, instance.Server, downlink, uplink, delay)
 			if err != nil {
 				log.Println(err)
 				up.WithLabelValues(instance.Server).Set(0)
