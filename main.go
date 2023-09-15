@@ -111,8 +111,8 @@ func executeQueryStats(addr, server string, inboundDownlink, inboundUplink,
 		outboundUplink.WithLabelValues(tag, server).Set(stats.Uplink)
 	}
 	for _, ob := range data.Observatory {
-		if ob.Delay == 99999999 {
-			ob.Delay = -1
+		if ob.Delay > 10000 {
+			ob.Delay = -500
 		}
 		outboundDelay.WithLabelValues(ob.OutboundTag, server).Set(ob.Delay)
 	}
