@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -65,7 +64,8 @@ import (
 // 	return nil
 // }
 
-func executeQueryStats(addr, server string, downlink, uplink, delay *prometheus.GaugeVec) error {
+func executeQueryStats(addr, server string, inboundDownlink, inboundUplink,
+	outboundDownlink, outboundUplink, outboundDelay *prometheus.GaugeVec) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/debug/vars", nil)
@@ -78,7 +78,7 @@ func executeQueryStats(addr, server string, downlink, uplink, delay *prometheus.
 	}
 
 	defer func() {
-		io.Copy(ioutil.Discard, resp.Body)
+		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}()
 
@@ -92,23 +92,29 @@ func executeQueryStats(addr, server string, downlink, uplink, delay *prometheus.
 				Downlink float64 `json:"downlink"`
 				Uplink   float64 `json:"uplink"`
 			} `json:"inbound"`
+			Outbound map[string]struct {
+				Downlink float64 `json:"downlink"`
+				Uplink   float64 `json:"uplink"`
+			}
 		} `json:"stats"`
 	}{}
 	err = json.NewDecoder(resp.Body).Decode(&data)
 	if err != nil {
 		return err
 	}
-	for _, tag := range []string{"tproxy", "shadowsocks", "vmess0", "vmess1"} {
-		if stats, ok := data.Stats.Inbound[tag]; ok {
-			downlink.WithLabelValues(tag, server).Set(stats.Downlink)
-			uplink.WithLabelValues(tag, server).Set(stats.Uplink)
-		}
+	for tag, stats := range data.Stats.Inbound {
+		inboundDownlink.WithLabelValues(tag, server).Set(stats.Downlink)
+		inboundUplink.WithLabelValues(tag, server).Set(stats.Uplink)
+	}
+	for tag, stats := range data.Stats.Outbound {
+		outboundDownlink.WithLabelValues(tag, server).Set(stats.Downlink)
+		outboundUplink.WithLabelValues(tag, server).Set(stats.Uplink)
 	}
 	for _, ob := range data.Observatory {
-		if ob.Delay > 10000 {
+		if ob.Delay == 99999999 {
 			ob.Delay = -1
 		}
-		delay.WithLabelValues(ob.OutboundTag, server).Set(ob.Delay)
+		outboundDelay.WithLabelValues(ob.OutboundTag, server).Set(ob.Delay)
 	}
 	return nil
 }
@@ -141,39 +147,55 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config with fatal: %s", err)
 	}
-	downlink := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	inboundDownlink := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "xray",
 		Subsystem: "traffic",
-		Name:      "downlink_bytes_total",
+		Name:      "inbound_downlink_bytes_total",
 		Help:      "downlink traffic of inbound",
-	}, []string{"inbound", "server"})
-	uplink := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	}, []string{"tag", "server"})
+	inboundUplink := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "xray",
 		Subsystem: "traffic",
-		Name:      "uplink_bytes_total",
+		Name:      "inbound_uplink_bytes_total",
 		Help:      "uplink traffic of inbound",
-	}, []string{"inbound", "server"})
-	delay := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	}, []string{"tag", "server"})
+	outboundDownlink := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "xray",
+		Subsystem: "traffic",
+		Name:      "outbound_downlink_bytes_total",
+		Help:      "downlink traffic of outbound",
+	}, []string{"tag", "server"})
+	outboundUplink := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "xray",
+		Subsystem: "traffic",
+		Name:      "outbound_uplink_bytes_total",
+		Help:      "uplink traffic of outbound",
+	}, []string{"tag", "server"})
+	outboundDelay := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "xray",
 		Subsystem: "observatory",
-		Name:      "delay_millisecond",
+		Name:      "outbound_delay_millisecond",
 		Help:      "observatory result of outbound, the unit is millisecond",
-	}, []string{"outbound", "server"})
+	}, []string{"tag", "server"})
 	up := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "xray",
 		Subsystem: "server",
 		Name:      "up",
 		Help:      "xray server up state",
 	}, []string{"server"})
-	prometheus.MustRegister(downlink, uplink, delay, up)
+	prometheus.MustRegister(inboundDownlink, inboundUplink,
+		outboundDownlink, outboundUplink, outboundDelay, up)
 
 	handler := promhttp.Handler()
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		downlink.Reset()
-		uplink.Reset()
-		delay.Reset()
+		inboundDownlink.Reset()
+		inboundUplink.Reset()
+		outboundDownlink.Reset()
+		outboundUplink.Reset()
+		outboundDelay.Reset()
 		for _, instance := range config.Instances {
-			err := executeQueryStats(instance.Host, instance.Server, downlink, uplink, delay)
+			err := executeQueryStats(instance.Host, instance.Server,
+				inboundDownlink, inboundUplink, outboundDownlink, outboundUplink, outboundDelay)
 			if err != nil {
 				log.Println(err)
 				up.WithLabelValues(instance.Server).Set(0)
